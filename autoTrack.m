@@ -20,7 +20,8 @@ if nargin < 2
     tau     = 50;
     radius  = 3;
     if nargin < 1
-        fpath = '/Volumes/VisualPred/ZF_visuomotor/Raw video/2016-02-18/S01';
+%         fpath = '/Volumes/VisualPred/ZF_visuomotor/Raw video/2016-02-18/S01';
+        fpath = '/Users/A_Soto/Desktop/S04';
     end
 end
 
@@ -88,13 +89,18 @@ T.time         = 0;
 T.frame_number = 0;
 T.fps          = 250;
 T.num_frames   = length(a);
+T.currIm       = [];
 
-while T.frame_number <= T.num_frames
+while T.frame_number < T.num_frames
   T.frame_number = T.frame_number + 1;
   
+  % current image filename
+  T.currIm = a(T.frame_number).name;
+  
   % load current frame
-  frame = imread([fpath filesep a(T.frame_number).name]);
-
+  frame = imread([fpath filesep T.currIm]);
+    
+  % background subtraction & threshold
   if isfield(T, 'segmenter')
     T = T.segmenter.segment(T, frame);
   end
@@ -103,9 +109,9 @@ while T.frame_number <= T.num_frames
     T = T.recognizer.recognize(T, frame);
   end
   
-  if isfield(T, 'representer')
-    T = T.representer.represent(T, frame);
-  end
+%   if isfield(T, 'representer')
+%     T = T.representer.represent(T, frame);
+%   end
   
   if isfield(T, 'tracker')
     T = T.tracker.track(T, frame);
@@ -141,13 +147,13 @@ function T = background_subtractor(T, frame)
 %  T     - tracker state structure.
 %  frame - image to process.
 
-% Do everything in grayscale.
+% Do everything in grayscale. (zebrafish vids already grayscale)
 % frame_grey = double(frame);
-frame_grey = frame;
+% frame_grey = frame;
 
 % Check to see if we're initialized
 if ~isfield(T.segmenter, 'background');
-  T.segmenter.background = frame_grey;
+  T.segmenter.background = frame;
 end
 
 % Pull local state out.
@@ -155,17 +161,46 @@ gamma  = T.segmenter.gamma;
 tau    = T.segmenter.tau;
 radius = T.segmenter.radius;
 
-% Rolling average update.
-T.segmenter.background = gamma * frame_grey + (1 - gamma) * ...
-    T.segmenter.background;
+% Rolling average update. (except for first frame)
+if T.frame_number == 1
+    
+    % Select region of interest around prey
+    warning off
+    imshow(frame,'InitialMagnification','fit');
+    warning on
+    title('Choose ROI around prey');
+    
+    % Interactively find ROI
+    h = impoly;
+    roi_poly = wait(h);
+    
+    % Store results
+    tmp = getPosition(h);
+    roi.x = tmp(:,1);
+    roi.y = tmp(:,2);
+    
+    delete(h), close all;
+    
+    % create a binary mask based on the selected ROI
+    maskEyes = roipoly(frame,roi.x,roi.y);
+    
+    % estimate background image
+    imBkgnd = roifill(frame,maskEyes);
+    
+    % store background image
+    T.segmenter.background = imBkgnd;
+else
+    T.segmenter.background = gamma * frame + (1 - gamma) * ...
+        T.segmenter.background;
+end
 
 % And threshold to get the foreground.
-T.segmenter.segmented = abs(T.segmenter.background - frame_grey) > tau;
+T.segmenter.segmented = abs(T.segmenter.background - frame) > tau;
 T.segmenter.segmented = imclose(T.segmenter.segmented, strel('disk', radius));
 
 return
 
-function T = find_blob(T, frame)
+function T = find_blob(T, ~)
 % FIND_BLOBS - simple recognizer of targets largest foreground bounding boxes.
 %
 % NOTE: This function is intended to be run as a RECOGNIZER in the
@@ -184,7 +219,32 @@ function T = find_blob(T, frame)
 % 
 % See also: run_tracker
 %
-T.recognizer.blobs = bwlabel(T.segmenter.segmented);
+
+% Pull local state out.
+tau    = T.segmenter.tau;
+
+% find connected components in binary (segmented) image
+fishBlobs = regionprops(T.segmenter.segmented,'BoundingBox','Area',...
+                  'Orientation','Centroid');
+
+% find the larger blobs
+idx = find([fishBlobs.Area] > tau);
+
+% % check for exactly two blobs
+% if R.NumObjects==2
+
+% redefine fishBlobs so that only the large blobs are included
+fishBlobs = fishBlobs(idx);
+
+% Make sure at lease one blob was recognized
+if ~isempty(fishBlobs)
+    
+    % take the smaller (prey) blob
+    % TO DO: Think of a way to use the predator blob for something useful
+    [I, IX] = min([fishBlobs.Area]);
+    T.representer.BoundingBox = fishBlobs(IX(size(IX,2))).BoundingBox;
+end
+  
 return
 
 function T = filter_blobs(T, frame)
@@ -208,11 +268,13 @@ function T = filter_blobs(T, frame)
 
 % Make sure at least one blob was recognized
 if sum(sum(T.recognizer.blobs))
-  % Extract the BoundingBox and Area of all blobs
-  R = regionprops(T.recognizer.blobs, 'BoundingBox', 'Area');
+    
+  % Extract the BoundingBox, Area, Orientation, and Centroid of all blobs
+  R = regionprops(T.recognizer.blobs, 'BoundingBox', 'Area',...
+                  'Orientation','Centroid');
   
-  % And only keep the biggest one
-  [I, IX] = max([R.Area]);
+  % And only keep the smaller one (for prey)
+  [I, IX] = min([R.Area]);
   T.representer.BoundingBox = R(IX(size(IX,2))).BoundingBox;
 end
 return
@@ -315,7 +377,7 @@ if ~isfield(T.visualizer, 'init');
 end
 
 % Display the current frame.
-image(frame);
+imshow(frame,'InitialMagnification','fit');
 
 % Draw the current measurement in red.
 if isfield(T.representer, 'BoundingBox')

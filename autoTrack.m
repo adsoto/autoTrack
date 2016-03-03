@@ -13,15 +13,24 @@ function T = autoTrack(fpath, gamma, tau, radius)
 %  tau     - tau parameter for background subtraction.
 %  radius  - radius for closing in background subtraction.
 
+close all
 
 % set default parameters if not supplied by user
 if nargin < 2
-    gamma   = 0.05;
+    gamma   = 0.025;
     tau     = 50;
     radius  = 3;
     if nargin < 1
-%         fpath = '/Volumes/VisualPred/ZF_visuomotor/Raw video/2016-02-18/S01';
-        fpath = '/Users/A_Soto/Desktop/S04';
+        % Check for Alberto's MacMini
+        path = fullfile('Users','alberto','Documents','GitHub-SourceTree');
+
+        if ~isempty(dir([filesep path]))
+            % path to data 
+            fpath = '/Volumes/VisualPred/ZF_visuomotor/Raw video/2016-02-19/S04';
+        else
+            % path to data on Alberto's MacBook
+            fpath = '/Users/A_Soto/Desktop/S04';
+        end
     end
 end
 
@@ -105,22 +114,22 @@ while T.frame_number < T.num_frames
     T = T.segmenter.segment(T, frame);
   end
   
+  % recognize fish blobs & represent object by its bounding box
   if isfield(T, 'recognizer')
     T = T.recognizer.recognize(T, frame);
   end
   
-%   if isfield(T, 'representer')
-%     T = T.representer.represent(T, frame);
-%   end
-  
+  % single iteration of Kalman filter, this is the tracker
   if isfield(T, 'tracker')
     T = T.tracker.track(T, frame);
   end
   
+  % visualize progress of tracking 
   if isfield(T, 'visualizer')
     T = T.visualizer.visualize(T, frame);
   end
   
+  % update time vector
   T.time = T.time + 1/T.fps;
 
 end
@@ -161,14 +170,14 @@ gamma  = T.segmenter.gamma;
 tau    = T.segmenter.tau;
 radius = T.segmenter.radius;
 
-% Rolling average update. (except for first frame)
+% Rolling Gaussian average update. (except for first frame)
 if T.frame_number == 1
     
     % Select region of interest around prey
     warning off
     imshow(frame,'InitialMagnification','fit');
     warning on
-    title('Choose ROI around prey');
+    title('Choose ROI around both fish');
     
     % Interactively find ROI
     h = impoly;
@@ -182,10 +191,10 @@ if T.frame_number == 1
     delete(h), close all;
     
     % create a binary mask based on the selected ROI
-    maskEyes = roipoly(frame,roi.x,roi.y);
+    maskFish = roipoly(frame,roi.x,roi.y);
     
     % estimate background image
-    imBkgnd = roifill(frame,maskEyes);
+    imBkgnd = roifill(frame,maskFish);
     
     % store background image
     T.segmenter.background = imBkgnd;
@@ -195,7 +204,7 @@ else
 end
 
 % And threshold to get the foreground.
-T.segmenter.segmented = abs(T.segmenter.background - frame) > tau;
+T.segmenter.segmented = (abs(T.segmenter.background - frame)) > tau;
 T.segmenter.segmented = imclose(T.segmenter.segmented, strel('disk', radius));
 
 return
@@ -209,9 +218,22 @@ function T = find_blob(T, ~)
 % FIND_BLOBS(T, frame) will recognize foreground objects in the
 % current image 'frame'.  The blobs detected in the image are
 % stored in T.recognizer.blobs.
+
+% Also serves as simple representer of targets as largest or smallest 
+% foreground bounding box.
+%
+% NOTE: This function also serves as the REPRESENTER in the
+% tracking framework.  See documentation for RUN_TRACKER.
+%
+% The function will represent the measurement for the
+% frame in image 'frame' as the bounding box of the largest
+% detected blob in the foreground of the frame.
 %
 % Parameters set in T.recognizer:
-%  T.recognizer.blobs - the blobs detected in the foreground of frame.
+%  T.recognizer.fishBlobs - the blobs detected in the foreground of frame.
+%
+% Parameters set in T.representer:
+%  T.representer.BoundingBox - the bounding box of smallest target.
 % 
 % Inputs:
 %  T     - tracker state structure.
@@ -224,25 +246,29 @@ function T = find_blob(T, ~)
 tau    = T.segmenter.tau;
 
 % find connected components in binary (segmented) image
-fishBlobs = regionprops(T.segmenter.segmented,'BoundingBox','Area',...
+cc = bwconncomp(T.segmenter.segmented);
+
+ccProps = regionprops(cc,'Area','BoundingBox','Area',...
                   'Orientation','Centroid');
 
-% find the larger blobs
-idx = find([fishBlobs.Area] > tau);
+% find the largest blobs 
+idx = find([ccProps.Area] > tau);
 
-% % check for exactly two blobs
-% if R.NumObjects==2
+% keep only the larger connected components, i.e., fish blobs
+ccProps = ccProps(idx);
 
-% redefine fishBlobs so that only the large blobs are included
-fishBlobs = fishBlobs(idx);
+% define binary mask of fish blobs
+T.recognizer.fishBlobs = ismember(labelmatrix(cc), idx);
 
 % Make sure at lease one blob was recognized
-if ~isempty(fishBlobs)
+if ~isempty(T.recognizer.fishBlobs)
     
     % take the smaller (prey) blob
     % TO DO: Think of a way to use the predator blob for something useful
-    [I, IX] = min([fishBlobs.Area]);
-    T.representer.BoundingBox = fishBlobs(IX(size(IX,2))).BoundingBox;
+    [I, IX] = min([ccProps.Area]);
+    
+    % save the bounding box measurement as REPRESENTER
+    T.representer.BoundingBox = ccProps(IX(size(IX,2))).BoundingBox;
 end
   
 return
@@ -376,8 +402,24 @@ if ~isfield(T.visualizer, 'init');
   T.visualizer.init = true;
 end
 
+% display the current fish blobs (as dark blobs)
+% figure, 
+ax1 = subplot(2,2,1);
+imshow(imcomplement(T.segmenter.segmented),'InitialMagnification','fit')
+ax1.Title.String = 'Segmented Image';
+
+ax2 = subplot(2,2,2);
+imshow(imcomplement(T.recognizer.fishBlobs),'InitialMagnification','fit')
+ax2.Title.String = 'Fish Blobs';
+
+% % display the current fish blobs
+% subplot(1,2,1)
+% imshow(T.recognizer.fishBlobs,'InitialMagnification','fit')
+    
 % Display the current frame.
+ax3 = subplot(2,2,[3 4]);
 imshow(frame,'InitialMagnification','fit');
+ax3.Title.String = 'Tracking Status';
 
 % Draw the current measurement in red.
 if isfield(T.representer, 'BoundingBox')
@@ -385,7 +427,7 @@ if isfield(T.representer, 'BoundingBox')
 end
 
 % And the current prediction in green
-if isfield(T.tracker, 'm_k1k1');
+if isfield(T.tracker, 'm_k1k1')
   rectangle('Position', T.tracker.m_k1k1, 'EdgeColor', 'g');
 end
 drawnow;
@@ -398,6 +440,6 @@ return
 
 % This is a callback function that toggles the pause state.
 function pauseHandler(a, b, h)
-setappdata(h, 'paused', xor(getappdata(h, 'paused'), true));
+setappdata(h, 'paused', xor(getappdata(h, 'paused'), true)) ;
 return
 
